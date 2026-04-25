@@ -310,16 +310,18 @@ const playWave = () => {
 };
 
 // ── GYROSCOPE ────────────────────────────────────────────
-const gyro = { beta:0, gamma:0, ox:0, oy:0, vx:0, vy:0 };
+// panX/panY = posição acumulada da "câmera" no mundo
+const gyro = { beta:0, gamma:0, panX:0, panY:0 };
 
 function initGyro() {
   const request = () => {
     window.addEventListener('deviceorientation', (e) => {
       if (e.beta === null || !G.playing) return;
-      const beta  = Math.max(-45, Math.min(45, (e.beta  || 0) - 50)); // phone tilt offset
+      const beta  = Math.max(-45, Math.min(45, (e.beta  || 0) - 50));
       const gamma = Math.max(-60, Math.min(60,  e.gamma || 0));
-      gyro.vx += (gyro.gamma - gamma) * CFG.GYRO_SENS;
-      gyro.vy += (gyro.beta  - beta)  * CFG.GYRO_SENS;
+      // Acumula a posição da câmera no mundo — monstros ficam fixos no ambiente
+      gyro.panX += (gyro.gamma - gamma) * CFG.GYRO_SENS * 5;
+      gyro.panY += (gyro.beta  - beta)  * CFG.GYRO_SENS * 5;
       gyro.gamma = gamma;
       gyro.beta  = beta;
     });
@@ -361,22 +363,31 @@ function spawnMonster() {
   for (const k of TYPE_KEYS) { r -= TYPES[k].weight; if (r<=0){ type=TYPES[k]; break; } }
   if (!type) type = TYPES.GRUNT;
 
-  const W = canvas.width, H = canvas.height, m = 100;
-  let x, y;
+  const W = canvas.width, H = canvas.height;
+  // Raio de spawn em coordenadas de mundo — ao redor da posição atual do jogador
+  const spawnR = Math.max(W, H) * 0.65;
+  const pWX = gyro.panX, pWY = gyro.panY;
+  let wx, wy;
   const edge = Math.floor(Math.random()*4);
-  if (edge===0) { x=rnd(m,W-m); y=-m; }
-  else if (edge===1) { x=rnd(m,W-m); y=H+m; }
-  else if (edge===2) { x=-m; y=rnd(m,H-m); }
-  else { x=W+m; y=rnd(m,H-m); }
+  if (edge===0) { wx=pWX+rnd(-spawnR,spawnR); wy=pWY-spawnR; }
+  else if (edge===1) { wx=pWX+rnd(-spawnR,spawnR); wy=pWY+spawnR; }
+  else if (edge===2) { wx=pWX-spawnR; wy=pWY+rnd(-spawnR,spawnR); }
+  else               { wx=pWX+spawnR; wy=pWY+rnd(-spawnR,spawnR); }
+
+  // Posição inicial na tela (derivada do mundo)
+  const sx = wx - gyro.panX + W/2;
+  const sy = wy - gyro.panY + H/2;
 
   const hpMult = 1 + G.wave * 0.18;
   G.monsters.push({
-    type, x, y,
+    type,
+    wx, wy,          // posição no MUNDO (fixa no ambiente)
+    x: sx, y: sy,    // posição na TELA (calculada a cada frame)
     hp: type.hp * hpMult, maxHp: type.hp * hpMult,
     angle:0, rotSpd: rnd(-.015,.015),
     alpha:0,
     hitFlash:0, hitTimer:0,
-    wander: Math.atan2(H/2-y, W/2-x),
+    wander: Math.atan2(pWY - wy, pWX - wx),
     wanderT:0,
     speed: type.speed * (1 + G.wave * 0.06),
     alive:true, dead:false,
@@ -425,7 +436,7 @@ function init() {
     texts     : [],
     hurtTimer : 0,
   };
-  gyro.ox = gyro.oy = gyro.vx = gyro.vy = 0;
+  gyro.panX = gyro.panY = 0;
   for (let i=0; i<3; i++) spawnMonster();
 }
 
@@ -509,11 +520,7 @@ function update(dt, now) {
 
   const W=canvas.width, H=canvas.height, cx=W/2, cy=H/2;
 
-  // Gyro world offset — inertia
-  gyro.vx *= CFG.GYRO_DAMP;
-  gyro.vy *= CFG.GYRO_DAMP;
-  gyro.ox  = clamp(gyro.ox + gyro.vx, -250, 250);
-  gyro.oy  = clamp(gyro.oy + gyro.vy, -250, 250);
+  // (gyro.panX/panY são acumulados direto no evento deviceorientation)
 
   // Timers
   G.spawnT += dt; G.waveT += dt;
@@ -556,22 +563,27 @@ function update(dt, now) {
 
     if (!m.alive) continue;
 
-    // Wander toward center
+    // Move em WORLD SPACE em direção ao jogador (posição da câmera = gyro.panX/Y)
+    const pWX = gyro.panX, pWY = gyro.panY;
     m.wanderT -= dt;
     if (m.wanderT <= 0) {
-      const toCenter = Math.atan2(cy - m.y, cx - m.x);
+      const toCenter = Math.atan2(pWY - m.wy, pWX - m.wx);
       m.wander  = lerp(m.wander, toCenter, .4) + rnd(-.4,.4);
       m.wanderT = rnd(600, 1800);
     }
-    // Steer gently to center
-    const toC = Math.atan2(cy - m.y, cx - m.x);
+    // Direciona suavemente ao jogador no mundo
+    const toC = Math.atan2(pWY - m.wy, pWX - m.wx);
     m.wander  = lerp(m.wander, toC, .025);
 
     const spd = m.speed * dt;
-    m.x += Math.cos(m.wander) * spd;
-    m.y += Math.sin(m.wander) * spd;
+    m.wx += Math.cos(m.wander) * spd;
+    m.wy += Math.sin(m.wander) * spd;
 
-    // Attack
+    // Converte mundo → tela a cada frame
+    m.x = m.wx - gyro.panX + W/2;
+    m.y = m.wy - gyro.panY + H/2;
+
+    // Ataque: distância em tela até a mira (centro)
     const d2 = dist2(m.x, m.y, cx, cy);
     if (d2 < (m.type.size + 8) ** 2) {
       G.hp -= m.type.dmg * dt * .012;
